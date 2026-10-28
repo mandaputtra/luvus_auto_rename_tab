@@ -1,0 +1,50 @@
+id = "luvus.auto-rename-tabs"
+name = "Auto Rename Tabs"
+version = "0.1.0"
+min_luvus_version = "0.8.3"
+description = "Name tabs and panes from their current work: agent session, branch, directory."
+
+[[startup]]
+id = "start"
+command = ["python3", "auto_rename.py", "poller"]
+
+[[actions]]
+id = "restart"
+title = "Restart auto-rename loop"
+command = ["python3", "auto_rename.py", "restart"]
+
+[[settings]]
+key = "poll_ms"
+title = "Poll interval (ms)"
+type = "number"
+default = 500
+min = 200
+max = 5000
+step = 100
+
+[[settings]]
+key = "max_length"
+title = "Longest title (columns, tabs cap at 40)"
+type = "number"
+default = 40
+min = 10
+max = 160
+step = 5
+
+[[settings]]
+key = "position"
+title = "Prefix tab titles with their position"
+type = "bool"
+default = true
+
+[[settings]]
+key = "panes"
+title = "Name panes as well as tabs"
+type = "bool"
+default = true
+
+[[settings]]
+key = "prefer_agent"
+title = "Name tabs after the agent pane even when unfocused"
+type = "bool"
+default = false
