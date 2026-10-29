@@ -428,10 +428,15 @@ def rename_tab(pos, name):
 
 
 def rename_pane(pane_id, name):
-    """CLI pane naming works cross-workspace; empty clears via --clear."""
-    if name:
-        return sh("pane", "name", name, "--pane", str(pane_id))
-    return sh("pane", "name", "--clear", "--pane", str(pane_id))
+    """CLI pane naming works cross-workspace; empty clears via --clear.
+    Returns the name the server actually stored, or None on rejection."""
+    out = sh("pane", "name", name, "--pane", str(pane_id)) if name else \
+        sh("pane", "name", "--clear", "--pane", str(pane_id))
+    try:
+        res = json.loads(out).get("result", {})
+        return res.get("name") if isinstance(res, dict) else None
+    except (json.JSONDecodeError, AttributeError):
+        return None
 
 
 def poll_once(state, cfg, transcripts, home):
@@ -473,18 +478,30 @@ def poll_once(state, cfg, transcripts, home):
                 rename_tab(pos, desired)
                 state["seen_tabs"][key] = desired
             if cfg["panes"]:
-                for p, full in zip(panes, tab.get("panes", [])):
-                    label = pane_slug(resolve_pane(p, transcripts, home))
-                    if label is None:
-                        continue  # not slug-shaped; leave the pane alone
+                labels = [(p, full, pane_slug(resolve_pane(p, transcripts, home)))
+                          for p, full in zip(panes, tab.get("panes", []))]
+                claimed = {}  # slug -> pane_id holding it this poll
+                for p, full, label in labels:
+                    if label is not None and full.get("agent_name") == label:
+                        claimed[label] = p["pane_id"]  # holder keeps it
+                for p, full, label in labels:
+                    if label is not None and label not in claimed:
+                        # Slug aliases are server-unique: first pane wins,
+                        # the rest keep whatever they have (no hopping).
+                        claimed.setdefault(label, p["pane_id"])
+                for p, full, label in labels:
+                    if label is None or claimed.get(label) != p["pane_id"]:
+                        continue  # unshaped, or lost the claim
                     cur = full.get("agent_name")
                     skey = state["seen_panes"].get(p["pane_id"])
                     v = state["locks"].judge(
                         "panes", p["pane_id"], cur or "", label, skey or "")
                     state["seen_panes"][p["pane_id"]] = label if v == "ours" else cur
                     if v == "ours" and cur != label:
-                        rename_pane(p["pane_id"], label)
-                        state["seen_panes"][p["pane_id"]] = label
+                        stored = rename_pane(p["pane_id"], label)
+                        # Believe the server, not the request: a rejection
+                        # (e.g. alias taken) keeps state at the live value.
+                        state["seen_panes"][p["pane_id"]] = stored if stored else cur
     state["locks"].first_poll = False
     state["locks"].save()
 
