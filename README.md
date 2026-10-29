@@ -1,13 +1,13 @@
 # Auto Rename Tabs
 
-A [Luvus](https://luvus.dev) module that names your tabs and panes from their
+A [Luvus](https://luvus.dev) module that names your tabs from their
 current work. Trimmed port of
 [kryptamine/herdr-auto-title](https://github.com/kryptamine/herdr-auto-title).
 
 ## Install
 
 ```sh
-luvus module install <owner>/luvus_auto_rename_tab
+luvus module install mandaputtra/luvus_auto_rename_tab
 ```
 
 Or link a checkout while developing:
@@ -38,18 +38,16 @@ $HOME                                  →  3 · Shell
   shortened (`bugfix-…-mc-13675` → `MC-13675`).
 - Rename a tab yourself and the module stops touching it. Clear the title
   to hand it back.
-- Panes are named only when the label is already a valid pane slug
-  (`[a-z][a-z0-9_-]{0,31}`) — typically plain shells get their directory
-  name; agent panes are left alone. Luvus pane names are `@mention`
-  aliases, not display titles, so descriptive labels are rejected by the
-  server.
+- Panes are left alone (`p<number>`). Luvus pane names are `@mention`
+  aliases (`[a-z][a-z0-9_-]{0,31}`), not display titles, so auto-naming
+  them caused more blink than value.
 
 ## Limitations (v1)
 
 - **Tabs rename in the active workspace only.** `tab.rename` by position is
   active-workspace scoped and cross-workspace ids return `not_found`; the
   poller never steals focus, so background tabs get titled when you visit
-  them. Panes rename globally.
+  them.
 - **Tab names cap at 40 characters** (server limit); titles truncate to fit.
 - **No ssh-host / editor-file / process sources.** `pane.processes` hides
   argv and cwd, and snapshots carry no terminal title. These return if
@@ -66,7 +64,6 @@ Settings → Modules, or `luvus module settings luvus.auto-rename-tabs`:
 | `poll_ms` | `500` | Snapshot poll interval |
 | `max_length` | `40` | Longest title in columns (tabs cap at 40) |
 | `position` | `true` | Prefix tab titles with their position |
-| `panes` | `true` | Name panes as well as tabs |
 | `prefer_agent` | `false` | Name tabs after the agent pane even when unfocused |
 
 Restart after changing settings:

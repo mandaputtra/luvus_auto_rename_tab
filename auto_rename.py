@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Auto-rename Luvus tabs and panes from their current work.
+"""Auto-rename Luvus tabs from their current work.
 
 Trimmed port of herdr-auto-title: 500ms session.snapshot poll -> diff ->
 rename iff changed. Title ladder: agent transcript > agent_session_title >
-branch > cwd > "Shell". Hand-set titles lock (Current/Desired/Seen triple);
-clearing hands the tab/pane back.
+branch > cwd > "Shell". Panes are left alone (p<number>). Hand-set tab
+titles lock (Current/Desired/Seen triple); clearing hands the tab back.
 
 Usage (run by luvus, not by hand):
     auto_rename.py poller    # long-lived loop; started by [[startup]]
@@ -107,12 +107,6 @@ def truncate(text, width):
     return "".join(out).rstrip() + "…"
 
 
-_PANE_SLUG = re.compile(r"[a-z][a-z0-9_-]{0,31}\Z")
-
-
-def pane_slug(label):
-    """Luvus pane names are @mention slugs; return label iff already valid."""
-    return label if _PANE_SLUG.match(label or "") else None
 
 
 # --- agent transcript readers (host-independent file formats) ---------------
@@ -348,32 +342,6 @@ def resolve_tab(panes, prefer_agent, transcripts, dirs, home, branch):
     return SEP.join(parts), ctx
 
 
-def resolve_pane(pane, transcripts, home):
-    sess = pane.get("agent_session")
-    agent = (pane.get("agent") or "").lower()
-    activity = None
-    if sess and transcripts and agent in ("claude", "codex", "grok", "pi"):
-        try:
-            if agent == "claude":
-                activity = transcripts.claude_topic(sess, [pane.get("cwd") or ""])
-            elif agent == "codex":
-                activity = transcripts.codex_topic(sess)
-            elif agent == "grok":
-                activity = transcripts.grok_title(sess, [pane.get("cwd") or ""])
-            else:
-                activity = transcripts.pi_topic(sess)
-        except OSError:
-            activity = None
-    if not activity:
-        activity = pane.get("agent_session_title")
-    if activity and sanitize(activity):
-        return sanitize(activity)
-    d = dir_name(pane.get("cwd"), home)
-    if d:
-        return d
-    return (pane.get("agent") or FALLBACK)
-
-
 # --- manual-title triple (Current/Desired/Seen) ------------------------------
 
 class Locks:
@@ -427,17 +395,6 @@ def rename_tab(pos, name):
     return uhp("tab.rename", {"tab": pos, "name": name})
 
 
-def rename_pane(pane_id, name):
-    """CLI pane naming works cross-workspace; empty clears via --clear.
-    Returns the name the server actually stored, or None on rejection."""
-    out = sh("pane", "name", name, "--pane", str(pane_id)) if name else \
-        sh("pane", "name", "--clear", "--pane", str(pane_id))
-    try:
-        res = json.loads(out).get("result", {})
-        return res.get("name") if isinstance(res, dict) else None
-    except (json.JSONDecodeError, AttributeError):
-        return None
-
 
 def poll_once(state, cfg, transcripts, home):
     snap = snapshot()
@@ -477,31 +434,6 @@ def poll_once(state, cfg, transcripts, home):
             if active and verdict == "ours" and current != desired:
                 rename_tab(pos, desired)
                 state["seen_tabs"][key] = desired
-            if cfg["panes"]:
-                labels = [(p, full, pane_slug(resolve_pane(p, transcripts, home)))
-                          for p, full in zip(panes, tab.get("panes", []))]
-                claimed = {}  # slug -> pane_id holding it this poll
-                for p, full, label in labels:
-                    if label is not None and full.get("agent_name") == label:
-                        claimed[label] = p["pane_id"]  # holder keeps it
-                for p, full, label in labels:
-                    if label is not None and label not in claimed:
-                        # Slug aliases are server-unique: first pane wins,
-                        # the rest keep whatever they have (no hopping).
-                        claimed.setdefault(label, p["pane_id"])
-                for p, full, label in labels:
-                    if label is None or claimed.get(label) != p["pane_id"]:
-                        continue  # unshaped, or lost the claim
-                    cur = full.get("agent_name")
-                    skey = state["seen_panes"].get(p["pane_id"])
-                    v = state["locks"].judge(
-                        "panes", p["pane_id"], cur or "", label, skey or "")
-                    state["seen_panes"][p["pane_id"]] = label if v == "ours" else cur
-                    if v == "ours" and cur != label:
-                        stored = rename_pane(p["pane_id"], label)
-                        # Believe the server, not the request: a rejection
-                        # (e.g. alias taken) keeps state at the live value.
-                        state["seen_panes"][p["pane_id"]] = stored if stored else cur
     state["locks"].first_poll = False
     state["locks"].save()
 
@@ -521,12 +453,11 @@ def run_poller():
     cfg = {"poll_ms": num("poll_ms", 500),
            "max_length": num("max_length", 50),
            "position": flag("position", True),
-           "panes": flag("panes", True),
            "prefer_agent": flag("prefer_agent", False)}
     state_dir = os.environ.get("LUVUS_MODULE_STATE_DIR", "/tmp")
     os.makedirs(state_dir, exist_ok=True)
     state = {"locks": Locks(os.path.join(state_dir, "manual-names.json")),
-             "seen_tabs": {}, "seen_panes": {}}
+             "seen_tabs": {}}
     transcripts = TranscriptStore(default_homes())
     home = os.path.expanduser("~")
     interval = max(0.2, cfg["poll_ms"] / 1000.0)
@@ -568,12 +499,12 @@ def main(argv):
         print("restarted")
     elif argv[1] == "once":
         cfg = {"poll_ms": 500, "max_length": num("max_length", 50),
-               "position": flag("position", True), "panes": flag("panes", True),
+               "position": flag("position", True),
                "prefer_agent": flag("prefer_agent", False)}
         state = {"locks": Locks(os.path.join(
             os.environ.get("LUVUS_MODULE_STATE_DIR", "/tmp"),
             "manual-names.json")),
-            "seen_tabs": {}, "seen_panes": {}}
+            "seen_tabs": {}}
         state["locks"].first_poll = False  # never claim hands in once mode
         poll_once(state, cfg, TranscriptStore(default_homes()),
                   os.path.expanduser("~"))

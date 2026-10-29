@@ -1,11 +1,11 @@
 # Auto Rename Tabs
 
-Luvus module that names tabs and panes from their current work, ported from herdr-auto-title.
+Luvus module that names tabs from their current work, ported from herdr-auto-title.
 
 ## Language
 
 **Title**:
-The auto-computed label for a tab or pane (`N · part › part`).
+The auto-computed label for a tab (`N · part › part`).
 _Avoid_: name, caption
 
 **Manual title**:
