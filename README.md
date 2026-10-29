@@ -30,14 +30,13 @@ No build step — the poller is dependency-free Python 3 stdlib.
 an agent working on OAuth scopes       →  1 · Implement OAuth scopes › dashboard
 $HOME                                  →  3 · Shell
 ```
-
-- The number in front is the tab's position.
 - Agent tabs are named after the agent's session (transcript files for
-  Claude, Codex, Grok, Pi, else the live session title).
+  Claude, Codex, Grok, Pi, else the live session title) and follow it
+  when the session changes.
 - The default branch has no special handling in v1: any branch shows,
   shortened (`bugfix-…-mc-13675` → `MC-13675`).
-- Rename a tab yourself and the module stops touching it. Clear the title
-  to hand it back.
+- Rename a tab yourself and the module stops touching it — until that
+  pane's agent session turns over or you clear the title, which hands it back.
 - Panes are left alone (`p<number>`). Luvus pane names are `@mention`
   aliases (`[a-z][a-z0-9_-]{0,31}`), not display titles, so auto-naming
   them caused more blink than value.

@@ -365,8 +365,11 @@ class Locks:
         except OSError:
             pass
 
-    def judge(self, kind, key, current, desired, seen):
-        """-> 'ours' | 'manual' | 'clear'."""
+    def judge(self, kind, key, current, desired, seen, session=None):
+        """-> 'ours' | 'manual'.
+        A lock pins a user title to the session it was set under: a new
+        agent session releases it, so a tab never freezes on work that
+        moved on. Old label-only entries are dropped and judged fresh."""
         entry = self.data[kind].get(key)
         if entry and entry.get("label") != current:
             del self.data[kind][key]  # stale id reuse releases
@@ -375,17 +378,25 @@ class Locks:
             if current in ("", None):
                 del self.data[kind][key]  # cleared: hand back
                 return "ours"
-            return "manual"
+            if "session" not in entry:
+                # Pre-session lock: drop it and judge fresh below. A user
+                # title re-locks (with session); our stale auto-title
+                # matches desired/seen and is reclaimed.
+                del self.data[kind][key]
+                entry = None
+            elif session != entry.get("session"):
+                del self.data[kind][key]  # session turned over: hand back
+                return "ours"
+            else:
+                return "manual"
         if self.first_poll:
             return "ours"
         if not current:
             return "ours"  # empty label = unnamed, not the user's
         if current == desired or current == seen:
             return "ours"
-        self.data[kind][key] = {"label": current}
+        self.data[kind][key] = {"label": current, "session": session}
         return "manual"
-    def release(self, kind, key):
-        self.data[kind].pop(key, None)
 
 
 # --- poll loop ---------------------------------------------------------------
@@ -429,11 +440,15 @@ def poll_once(state, cfg, transcripts, home):
             current = tab.get("name")  # None = default position label
             seen = state["seen_tabs"].get(key)
             verdict = state["locks"].judge(
-                "tabs", key, current or "", desired, seen or "")
+                "tabs", key, current or "", desired, seen or "",
+                session=(ctx or {}).get("agent_session"))
             state["seen_tabs"][key] = desired if verdict == "ours" else current
             if active and verdict == "ours" and current != desired:
-                rename_tab(pos, desired)
-                state["seen_tabs"][key] = desired
+                res = rename_tab(pos, desired) or {}
+                # Believe the server: only a confirmed rename advances seen,
+                # so a rejection is retried, never mistaken for the user's.
+                if res.get("type") == "ok":
+                    state["seen_tabs"][key] = desired
     state["locks"].first_poll = False
     state["locks"].save()
 
@@ -449,6 +464,38 @@ def default_homes():
             "pi": []}
 
 
+def claim_pidfile(path):
+    """At most one poller per state dir: retire a live predecessor, else
+    exit if it refuses to die. Stale pidfiles (dead pid) are taken over."""
+    import signal
+    try:
+        with open(path) as f:
+            old = int(f.read().strip())
+    except (OSError, ValueError):
+        old = None
+    if old and old != os.getpid():
+        for sig in (signal.SIGTERM, signal.SIGKILL):
+            try:
+                os.kill(old, sig)
+            except OSError:
+                break  # dead already; take over below
+            for _ in range(20 if sig == signal.SIGTERM else 10):
+                try:
+                    os.kill(old, 0)
+                except OSError:
+                    break
+                time.sleep(0.1)
+            else:
+                continue
+            break
+        else:
+            print("poller %d still alive; exiting" % old,
+                  file=sys.stderr, flush=True)
+            sys.exit(1)
+    with open(path, "w") as f:
+        f.write(str(os.getpid()))
+
+
 def run_poller():
     cfg = {"poll_ms": num("poll_ms", 500),
            "max_length": num("max_length", 50),
@@ -456,14 +503,12 @@ def run_poller():
            "prefer_agent": flag("prefer_agent", False)}
     state_dir = os.environ.get("LUVUS_MODULE_STATE_DIR", "/tmp")
     os.makedirs(state_dir, exist_ok=True)
+    claim_pidfile(os.path.join(state_dir, "poller.pid"))
     state = {"locks": Locks(os.path.join(state_dir, "manual-names.json")),
              "seen_tabs": {}}
     transcripts = TranscriptStore(default_homes())
     home = os.path.expanduser("~")
     interval = max(0.2, cfg["poll_ms"] / 1000.0)
-    pidfile = os.path.join(state_dir, "poller.pid")
-    with open(pidfile, "w") as f:
-        f.write(str(os.getpid()))
     while True:
         try:
             poll_once(state, cfg, transcripts, home)

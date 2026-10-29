@@ -1,6 +1,6 @@
 id = "luvus.auto-rename-tabs"
 name = "Auto Rename Tabs"
-version = "0.2.0"
+version = "0.3.0"
 min_luvus_version = "0.8.3"
 description = "Name tabs from their current work: agent session, branch, directory."
 
