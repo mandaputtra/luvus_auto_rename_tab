@@ -37,8 +37,3 @@ title = "Prefix tab titles with their position"
 type = "bool"
 default = true
 
-[[settings]]
-key = "prefer_agent"
-title = "Name tabs after the agent pane even when unfocused"
-type = "bool"
-default = false

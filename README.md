@@ -33,8 +33,9 @@ $HOME                                  →  3 · Shell
 - Agent tabs are named after the agent's session (transcript files for
   Claude, Codex, Grok, Pi, else the live session title) and follow it
   when the session changes.
-- The default branch has no special handling in v1: any branch shows,
-  shortened (`bugfix-…-mc-13675` → `MC-13675`).
+- Other tabs show just the app in the tab's first pane (the leaf
+  executable from `pane.processes`, e.g. `nvim`). Bare shells fall back
+  to branch and directory (`MC-13200 › dashboard`); `$HOME` alone is `Shell`.
 - Rename a tab yourself and the module stops touching it — until that
   pane's agent session turns over or you clear the title, which hands it back.
 - Panes are left alone (`p<number>`). Luvus pane names are `@mention`
@@ -48,8 +49,8 @@ $HOME                                  →  3 · Shell
   poller never steals focus, so background tabs get titled when you visit
   them.
 - **Tab names cap at 40 characters** (server limit); titles truncate to fit.
-- **No ssh-host / editor-file / process sources.** `pane.processes` hides
-  argv and cwd, and snapshots carry no terminal title. These return if
+- **No ssh-host / editor-file sources.** `pane.processes` hides argv and
+  cwd, and snapshots carry no terminal title. These return if
   `terminal.backend.*` probes find the data.
 - **No workspace topics.** `workspace.report_metadata` exists but sidebar
   `$topic` rendering is unverified.
@@ -63,7 +64,7 @@ Settings → Modules, or `luvus module settings luvus.auto-rename-tabs`:
 | `poll_ms` | `500` | Snapshot poll interval |
 | `max_length` | `40` | Longest title in columns (tabs cap at 40) |
 | `position` | `true` | Prefix tab titles with their position |
-| `prefer_agent` | `false` | Name tabs after the agent pane even when unfocused |
+
 
 Restart after changing settings:
 
@@ -74,9 +75,10 @@ luvus module run luvus.auto-rename-tabs restart
 ## How it works
 
 `[[startup]]` spawns `auto_rename.py poller`: every `poll_ms` it takes a
-`session.snapshot`, picks each tab's context pane (focused → working/blocked
-agent → most-recently-changed), resolves `activity › branch › directory`,
-and renames iff changed. Manual titles are protected by a
+`session.snapshot`, uses each tab's first pane, resolves the title (the
+foreground app alone when one runs, else `activity › branch › directory`;
+one `pane.processes` call per tab for the app), and renames iff changed.
+Manual titles are protected by a
 Current/Desired/Seen triple with label-guarded locks in the module state
 dir. See `docs/adr/0001-poll-loop-over-events.md` and
 `docs/research-auto-rename-tabs.md`.

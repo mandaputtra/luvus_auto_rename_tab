@@ -163,7 +163,7 @@ class TranscriptStore:
                             content = " ".join(
                                 b.get("text", "") for b in content
                                 if isinstance(b, dict))
-                        opening = first_line(strip_markup(str(content)))
+                        opening = first_line(sanitize(str(content)))
         return name or ai_title or opening
 
     def codex_topic(self, session_id):
@@ -286,31 +286,44 @@ def dir_name(cwd, home):
     base = os.path.basename(os.path.realpath(cwd))
     return base or None
 
+SHELLS = {"sh", "bash", "zsh", "fish", "dash", "ksh", "tcsh", "csh", "ash",
+          "nu", "elvish", "powershell", "pwsh", "cmd", "login", "tmux", "screen"}
 
-def context_pane(panes, prefer_agent):
-    """focused -> working/blocked agent -> most-recently-changed, ties by id."""
-    if not panes:
+
+def leaf_app(executables, agent):
+    """Foreground app: last executable unless it's the shell or the agent."""
+    if not executables:
         return None
-    for p in panes:
-        if p.get("focused"):
-            return p
-    pool = list(panes)
-    if prefer_agent:
-        pool = [p for p in panes if p.get("is_agent")] or pool
-    agents = [p for p in pool
-              if p.get("agent_status") in ("working", "blocked")]
-    if agents:
-        agents.sort(key=lambda p: str(p.get("pane_id")))
-        return agents[0]
-    panes = sorted(panes, key=lambda p: (-(p.get("rev") or 0), str(p.get("pane_id"))))
-    return panes[0]
+    leaf = os.path.basename(executables[-1])
+    if not leaf or leaf.lower() in SHELLS:
+        return None
+    if leaf.lower() == (agent or "").lower():
+        return None
+    return leaf
 
 
-def resolve_tab(panes, prefer_agent, transcripts, dirs, home, branch):
-    """Parts{Context, Branch, Agent, Activity} -> title or None."""
-    ctx = context_pane(panes, prefer_agent)
+def pane_executables(pane_id):
+    try:
+        d = json.loads(sh("pane", "processes", str(pane_id)))
+        return d.get("result", d).get("executables", [])
+    except (json.JSONDecodeError, AttributeError):
+        return []
+
+
+def context_pane(panes):
+    """First pane sets the tab title."""
+    return panes[0] if panes else None
+
+
+def resolve_tab(panes, transcripts, dirs, home, branch, app):
+    """App alone when present, else Parts{Context, Branch, Agent, Activity}."""
+    ctx = context_pane(panes)
     if ctx is None:
         return None, None
+    # foreground app wins alone: "nvim" says enough, no branch/dir.
+    # (agent panes never reach here: their leaf is the agent itself.)
+    if app and sanitize(app):
+        return sanitize(app), ctx
     parts = []
     # agent activity (transcript > live session title)
     activity = None
@@ -345,7 +358,7 @@ def resolve_tab(panes, prefer_agent, transcripts, dirs, home, branch):
 # --- manual-title triple (Current/Desired/Seen) ------------------------------
 
 class Locks:
-    """Persisted manual-title locks, label-guarded against id reuse."""
+    """Persisted manual-title locks + last-set titles, label-guarded."""
 
     def __init__(self, path):
         self.path = path
@@ -354,6 +367,7 @@ class Locks:
                 self.data = json.load(f)
         except (OSError, json.JSONDecodeError):
             self.data = {"tabs": {}, "panes": {}}
+        self.data.setdefault("seen", {})
         self.first_poll = True
 
     def save(self):
@@ -393,7 +407,7 @@ class Locks:
             return "ours"
         if not current:
             return "ours"  # empty label = unnamed, not the user's
-        if current == desired or current == seen:
+        if current == desired or current == self.data["seen"].get(key):
             return "ours"
         self.data[kind][key] = {"label": current, "session": session}
         return "manual"
@@ -419,36 +433,41 @@ def poll_once(state, cfg, transcripts, home):
         active = ws.get("active")
         for pos, tab in enumerate(ws.get("tabs", []), 1):
             panes = [{"pane_id": p.get("pane_id"),
-                      "focused": p.get("focused"),
                       "agent": p.get("agent"),
-                      "is_agent": p.get("is_agent"),
-                      "agent_status": p.get("agent_status"),
                       "agent_session": p.get("agent_session"),
                       "agent_session_title": p.get("agent_session_title"),
-                      "cwd": p.get("cwd"),
-                      "rev": p.get("content_revision", 0)}
+                      "cwd": p.get("cwd")}
                      for p in tab.get("panes", [])]
             key = "%s/%s" % (ws.get("name"), pos)
+            app = None
+            if panes:
+                # one pane.processes call per tab (~25 ms), first pane
+                # sets the title. Runs on every workspace: judged via the
+                # triple but only the active workspace can rename by
+                # position, so background titles land when visited.
+                app = leaf_app(pane_executables(panes[0].get("pane_id")),
+                               panes[0].get("agent"))
             desired, ctx = resolve_tab(
-                panes, cfg["prefer_agent"], transcripts,
-                [p.get("cwd") or "" for p in panes], home, branch)
+                panes, transcripts,
+                [p.get("cwd") or "" for p in panes], home, branch, app)
             # Luvus caps tab names at 40 characters; truncate the final
             # string (prefix included) so the rename is never rejected.
             desired = truncate(desired or FALLBACK, min(cfg["max_length"], 40))
             if cfg["position"]:
                 desired = truncate("%d · %s" % (pos, desired), 40)
             current = tab.get("name")  # None = default position label
-            seen = state["seen_tabs"].get(key)
             verdict = state["locks"].judge(
-                "tabs", key, current or "", desired, seen or "",
+                "tabs", key, current or "", desired,
+                state["locks"].data["seen"].get(key) or "",
                 session=(ctx or {}).get("agent_session"))
-            state["seen_tabs"][key] = desired if verdict == "ours" else current
+            if verdict == "ours":
+                state["locks"].data["seen"][key] = desired
             if active and verdict == "ours" and current != desired:
                 res = rename_tab(pos, desired) or {}
                 # Believe the server: only a confirmed rename advances seen,
                 # so a rejection is retried, never mistaken for the user's.
-                if res.get("type") == "ok":
-                    state["seen_tabs"][key] = desired
+                if res.get("type") != "ok":
+                    del state["locks"].data["seen"][key]
     state["locks"].first_poll = False
     state["locks"].save()
 
@@ -499,13 +518,11 @@ def claim_pidfile(path):
 def run_poller():
     cfg = {"poll_ms": num("poll_ms", 500),
            "max_length": num("max_length", 50),
-           "position": flag("position", True),
-           "prefer_agent": flag("prefer_agent", False)}
+           "position": flag("position", True)}
     state_dir = os.environ.get("LUVUS_MODULE_STATE_DIR", "/tmp")
     os.makedirs(state_dir, exist_ok=True)
     claim_pidfile(os.path.join(state_dir, "poller.pid"))
-    state = {"locks": Locks(os.path.join(state_dir, "manual-names.json")),
-             "seen_tabs": {}}
+    state = {"locks": Locks(os.path.join(state_dir, "manual-names.json"))}
     transcripts = TranscriptStore(default_homes())
     home = os.path.expanduser("~")
     interval = max(0.2, cfg["poll_ms"] / 1000.0)
@@ -544,12 +561,10 @@ def main(argv):
         print("restarted")
     elif argv[1] == "once":
         cfg = {"poll_ms": 500, "max_length": num("max_length", 50),
-               "position": flag("position", True),
-               "prefer_agent": flag("prefer_agent", False)}
+               "position": flag("position", True)}
         state = {"locks": Locks(os.path.join(
             os.environ.get("LUVUS_MODULE_STATE_DIR", "/tmp"),
-            "manual-names.json")),
-            "seen_tabs": {}}
+            "manual-names.json"))}
         state["locks"].first_poll = False  # never claim hands in once mode
         poll_once(state, cfg, TranscriptStore(default_homes()),
                   os.path.expanduser("~"))
