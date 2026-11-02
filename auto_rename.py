@@ -102,6 +102,19 @@ def sanitize(text):
     return text
 
 
+GENERIC = {"shell", "terminal", "node", "windows powershell",
+           "claude", "claude code", "agent", "coding agent"}  # herdr genericValues
+_RUNTIME = re.compile(r"^(node|python)[0-9.]*t?$")  # python3.13, python3.13t
+
+
+def is_generic_kind(name):
+    """A kind names a program class, not the work: reject it (herdr paneKind)."""
+    base = (name or "").lower()
+    base = base[:-4] if base.endswith(".exe") else base
+    return not base or base in SHELLS or base in GENERIC \
+        or bool(_RUNTIME.match(base))
+
+
 def meaningful(text, agent=None):
     """Trimmed herdr Meaningful: prompts, locations, bare shell/agent names.
     ponytail: whole-value rejects only; upstream also carves the remainder
@@ -114,12 +127,9 @@ def meaningful(text, agent=None):
         return None  # agent echoing its own name
     if _PROMPT.search(t):
         return None  # shell prompt: who/where, never what
-    if "://" in t or t.startswith(("~", "/")) \
-            or re.match(r"^[A-Za-z]:[\\/]", t):
-        return None  # location; the context half already says where
     base = low[:-4] if low.endswith(".exe") else low
-    if " " not in t and base in SHELLS:
-        return None  # bare shell name
+    if base in SHELLS or base in GENERIC or _RUNTIME.match(base):
+        return None  # bare program class, not the work
     return t
 
 
@@ -345,11 +355,13 @@ SHELLS = {"sh", "bash", "zsh", "fish", "dash", "ksh", "tcsh", "csh", "ash",
 
 
 def leaf_app(executables, agent):
-    """Foreground app: last executable unless it's the shell or the agent."""
+    """Foreground app: last executable unless it's a generic kind (shell,
+    runtime, agent self-name). ponytail: no lone-process check — Luvus
+    reports bare names without pids, so `cat` while it runs still titles."""
     if not executables:
         return None
     leaf = os.path.basename(executables[-1])
-    if not leaf or leaf.lower() in SHELLS:
+    if is_generic_kind(leaf):
         return None
     if leaf.lower() == (agent or "").lower():
         return None
