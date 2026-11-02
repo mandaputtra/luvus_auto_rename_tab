@@ -22,38 +22,26 @@ No build step — the poller is dependency-free Python 3 stdlib.
 > The first start renames every tab, including tabs you had already named by
 > hand. A tab you rename after that is left alone.
 
-## What you get
-
-```
-~/work/dashboard                       →  1 · dashboard
-~/work/dashboard on feature/MC-13200   →  2 · dashboard › MC-13200
-an agent working on OAuth scopes       →  1 · Implement OAuth scopes › dashboard
-$HOME                                  →  3 · Shell
-```
-- Agent tabs are named after the agent's session (transcript files for
-  Claude, Codex, Grok, Pi, else the live session title) and follow it
-  when the session changes.
-- Other tabs show just the app in the tab's first pane (the leaf
-  executable from `pane.processes`, e.g. `nvim`). Bare shells fall back
-  to branch and directory (`MC-13200 › dashboard`); `$HOME` alone is `Shell`.
-- Rename a tab yourself and the module stops touching it — until that
-  pane's agent session turns over or you clear the title, which hands it back.
-- Panes are left alone (`p<number>`). Luvus pane names are `@mention`
-  aliases (`[a-z][a-z0-9_-]{0,31}`), not display titles, so auto-naming
-  them caused more blink than value.
+- Agent tabs are named from the terminal title (the agent's own topic, e.g.
+  `π > 🔀 ACT: …`), else the transcript file (Claude, Codex, Grok, Pi),
+  else the live session title — and follow it when the session changes.
+- Plain shells fall back to the foreground app (`moon run api:dev` → `api`
+  after agent frames and prompt-shaped titles are stripped); bare shells
+  with only a prompt title fall back to branch and directory
+  (`MC-13200 › dashboard`); `$HOME` alone is `Shell`.
+- Tabs with several panes are named after the focused pane, else a
+  working/blocked agent pane, else the most-recently-changed pane.
 
 ## Limitations (v1)
 
 - **Tabs rename in the active workspace only.** `tab.rename` by position is
-  active-workspace scoped and cross-workspace ids return `not_found`; the
-  poller never steals focus, so background tabs get titled when you visit
-  them.
+  active-workspace scoped; the poller skips background workspaces' per-tab
+  work entirely and never steals focus, so their titles land when visited.
 - **Tab names cap at 40 characters** (server limit); titles truncate to fit.
-- **No ssh-host / editor-file sources.** `pane.processes` hides argv and
-  cwd, and snapshots carry no terminal title. These return if
-  `terminal.backend.*` probes find the data.
-- **No workspace topics.** `workspace.report_metadata` exists but sidebar
-  `$topic` rendering is unverified.
+- **No ssh-host / editor-file / topic sources.** Both process APIs report
+  `arguments_exposed: false` (no argv/cwd); `workspace.report_metadata`
+  rejects every write param in this build. See
+  `docs/research-improving-auto-rename.md` for the gap verdicts.
 
 ## Settings
 
@@ -75,10 +63,11 @@ luvus module run luvus.auto-rename-tabs restart
 ## How it works
 
 `[[startup]]` spawns `auto_rename.py poller`: every `poll_ms` it takes a
-`session.snapshot`, uses each tab's first pane, resolves the title (the
-foreground app alone when one runs, else `activity › branch › directory`;
-one `pane.processes` call per tab for the app), and renames iff changed.
-Manual titles are protected by a
-Current/Desired/Seen triple with label-guarded locks in the module state
-dir. See `docs/adr/0001-poll-loop-over-events.md` and
-`docs/research-auto-rename-tabs.md`.
+`session.snapshot` plus one `terminal.backend.snapshot`, picks each tab's
+context pane (focused → working/blocked agent → most-recently-changed),
+resolves the title (terminal title → transcript → session title → app,
+then `branch › directory`; process answers cache by `content_revision`),
+and renames iff changed. Prompt-shaped titles and bare program names are
+rejected. Manual titles are protected by a Current/Desired/Seen triple
+with session-scoped, label-guarded locks. See `docs/adr/` and
+`docs/research-*.md`.

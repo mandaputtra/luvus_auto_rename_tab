@@ -54,18 +54,25 @@ def snapshot():
         return {}
 
 
-def uhp(method, params=None):
-    req = json.dumps({"jsonrpc": "2.0", "id": "1",
-                      "method": method, "params": params or {}}) + "\n"
-    p = subprocess.run(
-        [os.environ.get("LUVUS_BIN_PATH", "luvus"), "uhp", "proxy"],
-        input=req, capture_output=True, text=True, timeout=30,
-        env=dict(os.environ),
-    )
+def proxy(method, params=None):
+    """One UHP call over `luvus uhp proxy` (correct envelope: id/method/params)."""
+    req = json.dumps({"id": "1", "method": method,
+                      "params": params or {}}) + "\n"
     try:
+        p = subprocess.run(
+            [os.environ.get("LUVUS_BIN_PATH", "luvus"), "uhp", "proxy"],
+            input=req, capture_output=True, text=True, timeout=30,
+            env=dict(os.environ),
+        )
         return json.loads(p.stdout).get("result", {})
     except (json.JSONDecodeError, AttributeError):
         return {}
+
+
+def backend_snapshot():
+    """Whole-session terminal.backend.snapshot: title/cwd/rev per pane."""
+    return proxy("terminal.backend.snapshot", {})
+
 
 def num(key, default):
     try:
@@ -78,11 +85,12 @@ def flag(key, default):
     v = os.environ.get("LUVUS_SETTING_" + key.upper())
     return default if v is None else v not in ("", "0", "false", "off")
 
-
 # --- sanitize (herdr internal/resolver/sanitization, trimmed) ----------------
 
+_PROMPT = re.compile(r"@.*[:#\$%>]\s*\S{0,40}\s*$|^\s*~[:#\$%>~\\/]|^\S{1,30}[:#\$%>]\s*$")
 _ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07]*\x07|\x1b\([0-9A-Z]")
 _WS = re.compile(r"\s+")
+
 
 
 def sanitize(text):
@@ -92,6 +100,52 @@ def sanitize(text):
     text = _WS.sub(" ", text).strip()
     text = re.sub(r"(›\s*){2,}", "› ", text).strip(" ›")
     return text
+
+
+def meaningful(text, agent=None):
+    """Trimmed herdr Meaningful: prompts, locations, bare shell/agent names.
+    ponytail: whole-value rejects only; upstream also carves the remainder
+    out of mid-string paths (sanitization.md location rules)."""
+    t = sanitize(text)
+    if not t:
+        return None
+    low = t.lower()
+    if agent and low == agent.lower():
+        return None  # agent echoing its own name
+    if _PROMPT.search(t):
+        return None  # shell prompt: who/where, never what
+    if "://" in t or t.startswith(("~", "/")) \
+            or re.match(r"^[A-Za-z]:[\\/]", t):
+        return None  # location; the context half already says where
+    base = low[:-4] if low.endswith(".exe") else low
+    if " " not in t and base in SHELLS:
+        return None  # bare shell name
+    return t
+
+
+def strip_agent_frame(title, agent):
+    """Per-agent terminal-title grammars (herdr title-resolution, trimmed)."""
+    t = sanitize(title)
+    if not t:
+        return None
+    a = (agent or "").lower()
+    if a == "codex":
+        t = re.sub(r"^\s*\[\s*[!.]\s*\]\s*Action Required\s*", "", t)
+        if " | " in t:
+            t = t.rsplit(" | ", 1)[0]  # trailing project, always last
+        return t.strip() or None
+    if a == "grok":
+        core = t[:-len("- grok")].strip() if t.endswith("- grok") else t
+        core = re.sub(r"^\S+\s+-\s+(Thinking|Responding|Waiting for response…?)\s+-\s+",
+                      "", core)
+        return core or None
+    if a == "pi":
+        m = re.match(r"^π\s+-\s+(.+?)\s+-\s+\S+\s*$", t)
+        if m:
+            return m.group(1).strip() or None
+        if re.match(r"^π\s+-\s+\S+\s*$", t):
+            return None  # unnamed session; context already says where
+    return t
 
 
 def truncate(text, width):
@@ -311,37 +365,57 @@ def pane_executables(pane_id):
 
 
 def context_pane(panes):
-    """First pane sets the tab title."""
-    return panes[0] if panes else None
+    """Focused -> working/blocked agent -> most-recently-changed, ties by id.
+    ponytail: upstream's tokenless-pane rule skipped (no tokens surface)."""
+    if not panes:
+        return None
+    for p in panes:
+        if p.get("focused"):
+            return p
+    agents = [p for p in panes if p.get("agent_status") in ("working", "blocked")]
+    if agents:
+        agents.sort(key=lambda p: str(p.get("pane_id")))
+        return agents[0]
+    ordered = sorted(panes, key=lambda p: (-(p.get("rev") or 0),
+                                           str(p.get("pane_id"))))
+    return ordered[0]
 
 
-def resolve_tab(panes, transcripts, dirs, home, branch, app):
-    """App alone when present, else Parts{Context, Branch, Agent, Activity}."""
+def resolve_tab(panes, transcripts, dirs, home, branch, app, titles):
+    """Ladder: terminal title > agent title > transcript > app,
+    then branch + dir. Junk values decline (herdr Meaningful)."""
     ctx = context_pane(panes)
     if ctx is None:
         return None, None
-    # foreground app wins alone: "nvim" says enough, no branch/dir.
-    # (agent panes never reach here: their leaf is the agent itself.)
-    if app and sanitize(app):
-        return sanitize(app), ctx
+    # terminal title: richest live source; per-agent frames stripped first.
+    raw = (titles or {}).get(ctx.get("pane_id"))
+    framed = strip_agent_frame(raw, ctx.get("agent")) if raw else None
+    activity = meaningful(framed, ctx.get("agent")) if framed else None
+    # agent's own title only when the pane's program IS the agent
+    # (leaf_app returns None for agent panes, so no fork needed).
     parts = []
-    # agent activity (transcript > live session title)
-    activity = None
-    sess = ctx.get("agent_session")
-    agent = (ctx.get("agent") or "").lower()
-    if sess and transcripts:
-        if agent == "claude":
-            activity = transcripts.claude_topic(sess, dirs)
-        elif agent == "codex":
-            activity = transcripts.codex_topic(sess)
-        elif agent == "grok":
-            activity = transcripts.grok_title(sess, dirs)
-        elif agent == "pi":
-            activity = transcripts.pi_topic(sess)
-    if not activity:
-        activity = ctx.get("agent_session_title")
-    if activity and sanitize(activity):
-        parts.append(sanitize(activity))
+    if activity:
+        parts.append(activity)
+    else:
+        # transcript > live session title
+        sess = ctx.get("agent_session")
+        agent = (ctx.get("agent") or "").lower()
+        if sess and transcripts:
+            if agent == "claude":
+                activity = transcripts.claude_topic(sess, dirs)
+            elif agent == "codex":
+                activity = transcripts.codex_topic(sess)
+            elif agent == "grok":
+                activity = transcripts.grok_title(sess, dirs)
+            elif agent == "pi":
+                activity = transcripts.pi_topic(sess)
+        if not activity:
+            activity = ctx.get("agent_session_title")
+        if activity and meaningful(activity, ctx.get("agent")):
+            parts.append(sanitize(activity))
+        elif app and sanitize(app):
+            # foreground app wins alone: "nvim" says enough, no branch/dir.
+            return sanitize(app), ctx
     # branch (default branch omitted by caller passing None)
     short = shorten_branch(branch)
     if short:
@@ -417,39 +491,62 @@ class Locks:
 
 def rename_tab(pos, name):
     """tab.rename by position is active-workspace scoped; empty clears."""
-    return uhp("tab.rename", {"tab": pos, "name": name})
+    return proxy("tab.rename", {"tab": pos, "name": name})
 
+
+
+def cached_executables(state, pane_id, rev):
+    """Reuse last process answer until content_revision moves (max 2 s old)."""
+    now = time.monotonic()
+    hit = state.setdefault("procs", {}).get(pane_id)
+    if hit and hit[0] == rev and now - hit[2] < 2.0:
+        return hit[1]
+    exes = pane_executables(pane_id)
+    state["procs"][pane_id] = (rev, exes, now)
+    # ponytail: unbounded dict, one small tuple per live pane; prune if ever large.
+    return exes
+
+
+def backend_titles():
+    """pane_id -> terminal_title for the whole session (one call)."""
+    try:
+        terms = backend_snapshot().get("terminals", [])
+    except AttributeError:
+        return {}
+    return {t.get("pane_id"): t.get("terminal_title") for t in terms
+            if t.get("pane_id") and t.get("terminal_title")}
 
 
 def poll_once(state, cfg, transcripts, home):
     snap = snapshot()
     workspaces = snap.get("workspaces", [])
-    # tab.rename by position is ACTIVE-workspace scoped (cross-workspace ids
-    # return not_found); panes rename globally via the CLI. NEVER
-    # workspace.focus here: that would steal the user's focus every poll.
-    # Background tabs get titled when visited.
+    # tab.rename by position is ACTIVE-workspace scoped; background workspaces
+    # burn a pane.processes call per tab per poll for titles that cannot
+    # land, so skip their per-tab work entirely (locks resume when visited).
+    # NEVER workspace.focus here: that would steal the user's focus.
+    titles = backend_titles()
     for ws in workspaces:
+        if not ws.get("active"):
+            continue
         branch = ws.get("branch")
-        active = ws.get("active")
         for pos, tab in enumerate(ws.get("tabs", []), 1):
             panes = [{"pane_id": p.get("pane_id"),
+                      "focused": p.get("focused"),
                       "agent": p.get("agent"),
+                      "agent_status": p.get("agent_status"),
                       "agent_session": p.get("agent_session"),
                       "agent_session_title": p.get("agent_session_title"),
-                      "cwd": p.get("cwd")}
+                      "cwd": p.get("cwd"),
+                      "rev": p.get("content_revision", 0)}
                      for p in tab.get("panes", [])]
             key = "%s/%s" % (ws.get("name"), pos)
-            app = None
-            if panes:
-                # one pane.processes call per tab (~25 ms), first pane
-                # sets the title. Runs on every workspace: judged via the
-                # triple but only the active workspace can rename by
-                # position, so background titles land when visited.
-                app = leaf_app(pane_executables(panes[0].get("pane_id")),
-                               panes[0].get("agent"))
+            ctx = context_pane(panes)
+            app = leaf_app(
+                cached_executables(state, ctx.get("pane_id"), ctx.get("rev")),
+                ctx.get("agent")) if ctx else None
             desired, ctx = resolve_tab(
                 panes, transcripts,
-                [p.get("cwd") or "" for p in panes], home, branch, app)
+                [p.get("cwd") or "" for p in panes], home, branch, app, titles)
             # Luvus caps tab names at 40 characters; truncate the final
             # string (prefix included) so the rename is never rejected.
             desired = truncate(desired or FALLBACK, min(cfg["max_length"], 40))
@@ -462,7 +559,7 @@ def poll_once(state, cfg, transcripts, home):
                 session=(ctx or {}).get("agent_session"))
             if verdict == "ours":
                 state["locks"].data["seen"][key] = desired
-            if active and verdict == "ours" and current != desired:
+            if verdict == "ours" and current != desired:
                 res = rename_tab(pos, desired) or {}
                 # Believe the server: only a confirmed rename advances seen,
                 # so a rejection is retried, never mistaken for the user's.
@@ -515,12 +612,22 @@ def claim_pidfile(path):
         f.write(str(os.getpid()))
 
 
+def session_state_dir():
+    """Per-session state: socket path differs per named session, so two
+    pollers never share one pidfile/lock file (cf. ADR 0002)."""
+    base = os.environ.get("LUVUS_MODULE_STATE_DIR", "/tmp")
+    sock = os.environ.get("LUVUS_SOCKET_PATH", "default")
+    tag = re.sub(r"[^A-Za-z0-9_-]", "_", sock)[-32:] or "default"
+    d = os.path.join(base, tag)
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
 def run_poller():
     cfg = {"poll_ms": num("poll_ms", 500),
            "max_length": num("max_length", 50),
            "position": flag("position", True)}
-    state_dir = os.environ.get("LUVUS_MODULE_STATE_DIR", "/tmp")
-    os.makedirs(state_dir, exist_ok=True)
+    state_dir = session_state_dir()
     claim_pidfile(os.path.join(state_dir, "poller.pid"))
     state = {"locks": Locks(os.path.join(state_dir, "manual-names.json"))}
     transcripts = TranscriptStore(default_homes())
@@ -544,8 +651,7 @@ def main(argv):
         run_poller()
     elif argv[1] == "restart":
         import signal
-        state_dir = os.environ.get("LUVUS_MODULE_STATE_DIR", "/tmp")
-        pidfile = os.path.join(state_dir, "poller.pid")
+        pidfile = os.path.join(session_state_dir(), "poller.pid")
         try:
             with open(pidfile) as f:
                 os.kill(int(f.read().strip()), signal.SIGTERM)
@@ -562,9 +668,8 @@ def main(argv):
     elif argv[1] == "once":
         cfg = {"poll_ms": 500, "max_length": num("max_length", 50),
                "position": flag("position", True)}
-        state = {"locks": Locks(os.path.join(
-            os.environ.get("LUVUS_MODULE_STATE_DIR", "/tmp"),
-            "manual-names.json"))}
+        state = {"locks": Locks(os.path.join(session_state_dir(),
+                                             "manual-names.json"))}
         state["locks"].first_poll = False  # never claim hands in once mode
         poll_once(state, cfg, TranscriptStore(default_homes()),
                   os.path.expanduser("~"))
