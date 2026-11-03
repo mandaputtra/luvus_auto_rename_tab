@@ -360,6 +360,9 @@ def leaf_app(executables, agent):
     reports bare names without pids, so `cat` while it runs still titles."""
     if not executables:
         return None
+    names = [os.path.basename(e).lower() for e in executables]
+    if agent and agent.lower() not in SHELLS and agent.lower() in names:
+        return None  # agent's descendants are its MCP servers/tools, not the app
     leaf = os.path.basename(executables[-1])
     if is_generic_kind(leaf):
         return None
