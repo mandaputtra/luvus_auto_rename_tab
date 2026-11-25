@@ -87,7 +87,7 @@ def flag(key, default):
 
 # --- sanitize (herdr internal/resolver/sanitization, trimmed) ----------------
 
-_PROMPT = re.compile(r"@.*[:#\$%>]\s*\S{0,40}\s*$|^\s*~[:#\$%>~\\/]|^\S{1,30}[:#\$%>]\s*$")
+_PROMPT = re.compile(r"@.*[:#\$%>]\s*\S*\s*$|^\s*~[:#\$%>~\\/]|^\S{1,30}[:#\$%>]\s*$")
 _ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07]*\x07|\x1b\([0-9A-Z]")
 _WS = re.compile(r"\s+")
 
@@ -139,6 +139,9 @@ def strip_agent_frame(title, agent):
     if not t:
         return None
     a = (agent or "").lower()
+    if a == "claude":
+        # leading status glyph (✳ idle, ◐◑ spinner) animates: renames every poll
+        return re.sub(r"^[^\w\s]+\s+", "", t) or None
     if a == "codex":
         t = re.sub(r"^\s*\[\s*[!.]\s*\]\s*Action Required\s*", "", t)
         if " | " in t:
@@ -458,6 +461,7 @@ class Locks:
             self.data = {"tabs": {}, "panes": {}}
         self.data.setdefault("seen", {})
         self.first_poll = True
+        self.position = True  # set from cfg by the caller
 
     def save(self):
         try:
@@ -498,6 +502,9 @@ class Locks:
             return "ours"  # empty label = unnamed, not the user's
         if current == desired or current == self.data["seen"].get(key):
             return "ours"
+        if self.position and key not in self.data["seen"] \
+                and re.match(r"\d+ · ", current):
+            return "ours"  # unseen tab wearing our prefix: stale auto-title
         self.data[kind][key] = {"label": current, "session": session}
         return "manual"
 
@@ -544,6 +551,13 @@ def poll_once(state, cfg, transcripts, home):
         if not ws.get("active"):
             continue
         branch = ws.get("branch")
+        # Stable tab ids: position keys shift when a tab closes or moves and
+        # our own title then reads as a hand rename, locking the tab forever.
+        listed = proxy("tab.list").get("tabs", [])
+        if listed and [t.get("name") for t in listed] != \
+                [t.get("name") for t in ws.get("tabs", [])]:
+            continue  # tabs changed between the two calls; next poll
+        ids = dict(enumerate((t.get("tab_id") for t in listed), 1))
         for pos, tab in enumerate(ws.get("tabs", []), 1):
             panes = [{"pane_id": p.get("pane_id"),
                       "focused": p.get("focused"),
@@ -554,7 +568,7 @@ def poll_once(state, cfg, transcripts, home):
                       "cwd": p.get("cwd"),
                       "rev": p.get("content_revision", 0)}
                      for p in tab.get("panes", [])]
-            key = "%s/%s" % (ws.get("name"), pos)
+            key = ids.get(pos) or "%s/%s" % (ws.get("name"), pos)
             ctx = context_pane(panes)
             app = leaf_app(
                 cached_executables(state, ctx.get("pane_id"), ctx.get("rev")),
@@ -645,6 +659,7 @@ def run_poller():
     state_dir = session_state_dir()
     claim_pidfile(os.path.join(state_dir, "poller.pid"))
     state = {"locks": Locks(os.path.join(state_dir, "manual-names.json"))}
+    state["locks"].position = cfg["position"]
     transcripts = TranscriptStore(default_homes())
     home = os.path.expanduser("~")
     interval = max(0.2, cfg["poll_ms"] / 1000.0)
@@ -686,6 +701,7 @@ def main(argv):
         state = {"locks": Locks(os.path.join(session_state_dir(),
                                              "manual-names.json"))}
         state["locks"].first_poll = False  # never claim hands in once mode
+        state["locks"].position = cfg["position"]
         poll_once(state, cfg, TranscriptStore(default_homes()),
                   os.path.expanduser("~"))
     else:
